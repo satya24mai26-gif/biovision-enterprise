@@ -2,7 +2,11 @@
 # BioVision Enterprise
 # .gitignore
 # ============================================
+<<<<<<< HEAD
 *.bin
+=======
+
+>>>>>>> 2c47a5f4285becef5b3ade087250bf9beee6a451
 # -------------------------
 # Python
 # -------------------------
@@ -157,4 +161,8 @@ vsv2
 !surveillance_snapshots/.gitkeep
 !models/.gitkeep
 !assets/.gitkeep
+<<<<<<< HEAD
 !docs/.gitkeep
+=======
+!docs/.gitkeep
+>>>>>>> 2c47a5f4285becef5b3ade087250bf9beee6a451
