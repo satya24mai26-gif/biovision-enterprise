@@ -1,31 +1,21 @@
 # BioVision Enterprise
 
-```{=html}
 <p align="center">
-```
-`<img src="assets/banner.png" alt="BioVision Enterprise Banner" width="100%">`{=html}
-```{=html}
+  <img src="assets/banner.png" alt="BioVision Enterprise Banner" width="100%">
 </p>
-```
-```{=html}
-<h1 align="center">
-```
-BioVision Enterprise
-```{=html}
-</h1>
-```
-```{=html}
+
+<h1 align="center">BioVision Enterprise</h1>
+
 <p align="center">
-```
-`<b>`{=html}Enterprise AI Platform for Biometric Identity, Face
-Recognition, CCTV Surveillance, Attendance Automation, QR
-Authentication, and Multi-Camera Security Operations.`</b>`{=html}
-```{=html}
+  <b>
+    Enterprise AI Platform for Biometric Identity, Face Recognition,
+    CCTV Surveillance, Attendance Automation, QR Authentication,
+    and Multi-Camera Security Operations.
+  </b>
 </p>
-```
-```{=html}
+
 <p align="center">
-```
+
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-5C3EE8?style=for-the-badge&logo=opencv)
 ![InsightFace](https://img.shields.io/badge/InsightFace-Face%20Recognition-orange?style=for-the-badge)
@@ -33,22 +23,15 @@ Authentication, and Multi-Camera Security Operations.`</b>`{=html}
 ![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
-```{=html}
 </p>
-```
 
-------------------------------------------------------------------------
+---
 
-# 🚀 Overview
+## 🚀 Overview
 
-**BioVision Enterprise** is an enterprise-grade desktop platform that
-combines biometric identity management, AI-powered face recognition,
-CCTV surveillance, attendance automation, QR authentication, and
-centralized security operations in a single application.
+BioVision Enterprise is an enterprise-grade desktop platform that combines biometric identity management, AI-powered face recognition, CCTV surveillance, attendance automation, QR authentication, and centralized security operations into a single application.
 
-Unlike conventional attendance systems, BioVision Enterprise is designed
-as a **central biometric identity platform**, where attendance is only
-one module among many.
+Unlike conventional attendance systems, **BioVision Enterprise** is designed as a centralized biometric identity platform where attendance is only one of several integrated modules.
 
 ------------------------------------------------------------------------
 
