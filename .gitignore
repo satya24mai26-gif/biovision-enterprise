@@ -1,0 +1,160 @@
+# ============================================
+# BioVision Enterprise
+# .gitignore
+# ============================================
+*.bin
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+
+# -------------------------
+# Virtual Environment
+# -------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# -------------------------
+# IDE
+# -------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# -------------------------
+# Operating System
+# -------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# -------------------------
+# Logs
+# -------------------------
+*.log
+logs/
+
+# -------------------------
+# SQLite Database
+# -------------------------
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# -------------------------
+# Generated Photos
+# -------------------------
+photos/
+qrcodes/
+unknown_faces/
+surveillance_snapshots/
+
+# -------------------------
+# Application Cache
+# -------------------------
+.cache/
+temp/
+tmp/
+*.tmp
+
+# -------------------------
+# Model Cache
+# (Keep models folder, ignore downloaded weights)
+# -------------------------
+models/**/*.onnx
+models/**/*.bin
+models/**/*.engine
+
+# -------------------------
+# Build Files
+# -------------------------
+build/
+dist/
+*.spec
+
+# -------------------------
+# Python Packaging
+# -------------------------
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# -------------------------
+# Testing
+# -------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# -------------------------
+# Jupyter
+# -------------------------
+.ipynb_checkpoints/
+
+# -------------------------
+# Environment Variables
+# -------------------------
+.env
+.env.*
+*.env
+
+# -------------------------
+# Backup Files
+# -------------------------
+*.bak
+*.old
+*.backup
+*.orig
+
+# -------------------------
+# Application Generated Reports
+# -------------------------
+exports/
+reports/
+
+# -------------------------
+# Local Configuration
+# -------------------------
+config.local.*
+settings.local.*
+
+# -------------------------
+# Runtime Files
+# -------------------------
+*.pid
+*.lock
+
+# -------------------------
+# Ignore Banner (Until Added)
+# -------------------------
+assets/banner.png
+
+# -------------------------
+# Ignore Demo Videos
+# -------------------------
+*.mp4
+*.avi
+*.mov
+vsv.py
+vsv2.py
+vsv2
+
+# -------------------------
+# Keep Folder Structure
+# -------------------------
+!photos/.gitkeep
+!qrcodes/.gitkeep
+!unknown_faces/.gitkeep
+!surveillance_snapshots/.gitkeep
+!models/.gitkeep
+!assets/.gitkeep
+!docs/.gitkeep
