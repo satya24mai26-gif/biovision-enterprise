@@ -17,9 +17,21 @@ from concurrent.futures import ThreadPoolExecutor
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+import faiss
+from ultralytics import YOLO
+from sklearn.cluster import DBSCAN
+import numpy as np
+from PIL import Image, ImageTk
+from scipy.spatial import distance as dist
+from collections import OrderedDict
 
 try: import winsound; HAS_SOUND = True
 except ImportError: HAS_SOUND = False
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+os.environ["OPENCV_LOG_LEVEL"] = "FATAL"
 
 # ---------- InsightFace & Threading ----------
 _MODEL_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -32,11 +44,16 @@ ai_executor = ThreadPoolExecutor(max_workers=2)
 # ---------- GLOBALS & CONFIG ----------
 DB_FILE = "students.db"
 SURVEILLANCE_DB_FILE = "surveillance.db"
-CAMERA_SOURCE = 2 
+CAMERA_SOURCE = 0 
 SIMILARITY_THRESHOLD = 0.45
 CCTV_COOLDOWN_SECONDS = 300 
 UNKNOWN_EVENT_COOLDOWN_SECONDS = 45
 PROCESS_EVERY_N = 3
+
+# --- MASTER CCTV SHARED MEMORY ---
+shared_cctv_frames = {} 
+focused_cctv_camera = [None]
+cctv_daemon_running = [False]
 
 THEMES = {
     "dark": {
@@ -97,7 +114,8 @@ def init_surveillance_db():
             snapshot_path TEXT,
             best_match_percentage REAL,
             action_taken TEXT,
-            details TEXT
+            details TEXT,
+            embedding BLOB DEFAULT NULL
         )""")
         c.execute("""CREATE TABLE IF NOT EXISTS surveillance_summary (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,6 +342,7 @@ def init_db():
             SELECT 'student', CAST(id AS TEXT), reg_no, name, course, mobile, photo_path, qr_path, embedding, is_twin
             FROM students
         """)
+        
         conn.commit()
 init_db()
 init_surveillance_db()
@@ -4439,6 +4458,839 @@ def open_identity_management_hub():
     tk.Button(right_card, text="🔄 Reset Active Stitching Grid Buffer", command=reset_stitching_matrix, 
               bg="#444", fg="white", font=("Segoe UI", 10), bd=0, cursor="hand2", pady=6).pack(fill="x", side="bottom", pady=4)
 
+
+def open_ghost_tracking_matrix():
+    win_name = "ghost_tracker"
+    
+    # Singleton Window Enforcement
+    if win_name in open_windows and open_windows[win_name].winfo_exists():
+        open_windows[win_name].deiconify()
+        open_windows[win_name].lift()
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Ghost Tracking Matrix (Autonomous Clustering)")
+    win.geometry("1300x800")
+    open_windows[win_name] = win
+    win.configure(bg="#050505")
+    add_window_toolbar(win, win_name, stop_camera_instance=None)
+
+    # --- Header UI ---
+    header = tk.Frame(win, bg="#050505")
+    header.pack(fill="x", padx=20, pady=15)
+    
+    tk.Label(header, text="👻 Phantom Entity Tracking (DBSCAN)", font=("Segoe UI", 18, "bold"), bg="#050505", fg="#00e5ff").pack(side="left")
+    
+    status_var = tk.StringVar(value="Status: Awaiting Matrix Compilation...")
+    tk.Label(header, textvariable=status_var, font=("Consolas", 12), bg="#050505", fg="#ffeb3b").pack(side="right", padx=10)
+
+    # --- Main Workspace ---
+    main_frame = tk.Frame(win, bg="#050505")
+    main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+    # Left: The Cluster Roster
+    roster_frame = tk.LabelFrame(main_frame, text=" Unidentified Recurring Entities ", bg="#121212", fg="#ff4444", font=("Segoe UI", 11, "bold"), padx=10, pady=10, width=400)
+    roster_frame.pack(side="left", fill="y", expand=False)
+    roster_frame.pack_propagate(False)
+
+    tv_clusters = ttk.Treeview(roster_frame, columns=("Entity ID", "Sightings", "Risk"), show="headings", height=20, style="SOCTreeview.Treeview")
+    tv_clusters.heading("Entity ID", text="Entity ID")
+    tv_clusters.heading("Sightings", text="Sightings")
+    tv_clusters.heading("Risk", text="Risk Profile")
+    tv_clusters.column("Entity ID", width=120, anchor="center")
+    tv_clusters.column("Sightings", width=100, anchor="center")
+    tv_clusters.column("Risk", width=120, anchor="center")
+    tv_clusters.pack(fill="both", expand=True, pady=5)
+
+    # Right: Entity Investigation Panel
+    investigate_frame = tk.LabelFrame(main_frame, text=" Entity Investigation Node ", bg="#121212", fg="#00e5ff", font=("Segoe UI", 11, "bold"), padx=15, pady=15)
+    investigate_frame.pack(side="right", fill="both", expand=True, padx=(15, 0))
+    
+    lbl_snapshot = tk.Label(investigate_frame, bg="black", text="SELECT ENTITY", fg="#555", font=("Segoe UI", 14))
+    lbl_snapshot.pack(pady=10)
+    
+    details_var = tk.StringVar(value="Select an entity from the roster to view their spatial tracks.")
+    tk.Label(investigate_frame, textvariable=details_var, bg="#121212", fg="white", font=("Segoe UI", 12), justify="left", wraplength=700).pack(pady=15, anchor="w")
+
+    # --- AI CLUSTERING ENGINE ---
+    def compile_ghost_matrix():
+        status_var.set("Status: Querying Surveillance Sub-Systems...")
+        win.update()
+        
+        with get_surveillance_conn() as conn:
+            # Fetch all unknown records that have a saved embedding BLOB
+            df = pd.read_sql_query("SELECT id, date, time, camera_name, snapshot_path, embedding FROM surveillance_unknowns WHERE embedding IS NOT NULL", conn)
+            
+        if df.empty or len(df) < 2:
+            status_var.set("Status: Insufficient vector data for clustering.")
+            return
+
+        status_var.set(f"Status: Clustering {len(df)} unknown vectors using DBSCAN...")
+        win.update()
+
+        # Convert BLOBs back to numpy arrays
+        embeddings = []
+        valid_indices = []
+        for idx, row in df.iterrows():
+            try:
+                emb = np.frombuffer(row['embedding'], dtype=np.float32)
+                embeddings.append(emb)
+                valid_indices.append(idx)
+            except Exception:
+                continue
+
+        X = np.array(embeddings)
+        
+        # Run DBSCAN (Density-Based Spatial Clustering)
+        # eps is the maximum distance between two samples for one to be considered as in the neighborhood of the other.
+        # min_samples is the number of samples in a neighborhood for a point to be considered as a core point.
+        db = DBSCAN(eps=0.45, min_samples=2, metric='cosine').fit(X)
+        labels = db.labels_
+        
+        df_valid = df.iloc[valid_indices].copy()
+        df_valid['Cluster'] = labels
+        
+        # Filter out noise (DBSCAN labels noise as -1)
+        clusters = df_valid[df_valid['Cluster'] != -1]
+        
+        tv_clusters.delete(*tv_clusters.get_children())
+        
+        if clusters.empty:
+            status_var.set("Status: No recurring entities detected. All intercepts are isolated noise.")
+            return
+
+        # Group by the cluster ID to find recurring ghosts
+        grouped = clusters.groupby('Cluster')
+        global ghost_memory
+        ghost_memory = {}
+        
+        for cluster_id, group in grouped:
+            sightings = len(group)
+            risk = "CRITICAL" if sightings >= 5 else "ELEVATED"
+            entity_name = f"GHOST_{cluster_id:04d}"
+            
+            # Save group data to memory for the UI to read
+            ghost_memory[entity_name] = group
+            
+            tv_clusters.insert("", tk.END, values=(entity_name, sightings, risk))
+            
+        status_var.set(f"Status: Matrix Compiled. {len(grouped)} Unique Entities Identified.")
+
+    # --- UI INTERACTION ---
+    def on_entity_select(event):
+        sel = tv_clusters.selection()
+        if not sel: return
+        entity_id = tv_clusters.item(sel[0])["values"][0]
+        
+        group = ghost_memory.get(entity_id)
+        if group is None: return
+        
+        # Grab the most recent snapshot
+        latest_record = group.sort_values(by=['date', 'time'], ascending=False).iloc[0]
+        snap_path = latest_record['snapshot_path']
+        
+        if snap_path and os.path.exists(snap_path):
+            try:
+                img = Image.open(snap_path).resize((300, 300), Image.Resampling.LANCZOS)
+                imgtk = ImageTk.PhotoImage(img)
+                lbl_snapshot.imgtk = imgtk
+                lbl_snapshot.configure(image=imgtk, text="")
+            except Exception:
+                lbl_snapshot.configure(image="", text="IMAGE CORRUPTED")
+        else:
+            lbl_snapshot.configure(image="", text="IMAGE NOT FOUND ON DISK")
+
+        # Build Intel Report
+        first_seen = group.sort_values(by=['date', 'time']).iloc[0]
+        cameras = ", ".join(group['camera_name'].unique())
+        
+        report = (
+            f"IDENTIFIER: {entity_id}\n"
+            f"TOTAL INTERCEPTS: {len(group)}\n\n"
+            f"FIRST SPOTTED: {first_seen['date']} at {first_seen['time']}\n"
+            f"LAST SPOTTED: {latest_record['date']} at {latest_record['time']}\n\n"
+            f"KNOWN ROUTES (Cameras): {cameras}"
+        )
+        details_var.set(report)
+
+    tv_clusters.bind("<<TreeviewSelect>>", on_entity_select)
+
+    # --- Action Buttons ---
+    action_frame = tk.Frame(investigate_frame, bg="#121212")
+    action_frame.pack(fill="x", side="bottom", pady=10)
+    
+    def register_entity(person_type):
+        sel = tv_clusters.selection()
+        if not sel: return messagebox.showwarning("Select Entity", "Select a Phantom Entity first.")
+        entity_id = tv_clusters.item(sel[0])["values"][0]
+        # In a full implementation, this would pass the embedding and snapshot to the enrollment module
+        messagebox.showinfo("Matrix Action", f"Routing {entity_id} to {person_type.upper()} Registration Pipeline...")
+
+    tk.Button(action_frame, text="⚠️ Register as Blacklist Threat", command=lambda: register_entity('blacklist'), bg="#d9534f", fg="white", font=("Segoe UI", 11, "bold"), cursor="hand2", padx=10, pady=5).pack(side="left", padx=10)
+    tk.Button(action_frame, text="✅ Register as Known Guest", command=lambda: register_entity('guest'), bg="#4CAF50", fg="white", font=("Segoe UI", 11, "bold"), cursor="hand2", padx=10, pady=5).pack(side="left", padx=10)
+    tk.Button(action_frame, text="🗑️ Purge Entity Data", bg="#555", fg="white", font=("Segoe UI", 11), cursor="hand2", padx=10, pady=5).pack(side="right", padx=10)
+
+    # Boot Sequence
+    tk.Button(roster_frame, text="⚡ RECOMPILE SPATIAL MATRIX", command=compile_ghost_matrix, bg="#884EA0", fg="white", font=("Segoe UI", 11, "bold"), cursor="hand2", pady=8).pack(fill="x", side="bottom", pady=5)
+    
+    win.after(500, compile_ghost_matrix)
+
+def open_master_soc_matrix():
+    win_name = "master_soc_matrix"
+    
+    if win_name in open_windows and open_windows[win_name].winfo_exists():
+        open_windows[win_name].deiconify()
+        open_windows[win_name].lift()
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Global SOC - Multi-Node Threat Matrix")
+    win.geometry("1450x880")
+    open_windows[win_name] = win
+    win.configure(bg="#050505")
+    add_window_toolbar(win, win_name, stop_camera_instance=None)
+
+    # --- Header UI ---
+    header = tk.Frame(win, bg="#050505")
+    header.pack(fill="x", padx=20, pady=10)
+    tk.Label(header, text="🌐 Global Multi-Node Security Command", font=("Segoe UI", 18, "bold"), bg="#050505", fg="#00e5ff").pack(side="left")
+    
+    kpi_frame = tk.Frame(header, bg="#050505")
+    kpi_frame.pack(side="right")
+    lbl_active_nodes = tk.Label(kpi_frame, text="Active Nodes: 0", font=("Consolas", 12, "bold"), fg="#00ff00", bg="#121212", padx=10, pady=5, bd=1, relief="solid")
+    lbl_active_nodes.pack(side="left", padx=5)
+
+    # --- Main Workspace Layout ---
+    main_workspace = tk.Frame(win, bg="#050505")
+    main_workspace.pack(fill="both", expand=True, padx=15, pady=5)
+
+    # LEFT: The Focus Camera Viewport (Large)
+    focus_frame = tk.LabelFrame(main_workspace, text=" PRIMARY INTERCEPT VIEWPORT ", bg="#0a0a0a", fg="#ffeb3b", font=("Consolas", 12, "bold"), padx=10, pady=10)
+    focus_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+    focus_frame.pack_propagate(False)
+
+    # BUG FIX 1: Pack the bottom threat feed BEFORE the expanding video label to prevent layout squishing
+    threat_frame = tk.Frame(focus_frame, bg="#121212", height=180)
+    threat_frame.pack(fill="x", side="bottom", pady=(10, 0))
+    threat_frame.pack_propagate(False)
+    
+    tv_threats = ttk.Treeview(threat_frame, columns=("Time", "Node", "Identity", "Threat Level"), show="headings", style="SOCTreeview.Treeview")
+    for c in tv_threats["columns"]: 
+        tv_threats.heading(c, text=c)
+        tv_threats.column(c, anchor="center")
+    tv_threats.pack(fill="both", expand=True)
+
+    lbl_focus_video = tk.Label(focus_frame, bg="black", text="AWAITING NODE SELECTION...", fg="#555", font=("Segoe UI", 14))
+    lbl_focus_video.pack(fill="both", expand=True)
+
+    # RIGHT: The Multi-Camera Grid (Scrollable)
+    grid_frame = tk.LabelFrame(main_workspace, text=" ACTIVE NODE MATRIX ", bg="#0a0a0a", fg="#00e5ff", font=("Consolas", 12, "bold"), width=420)
+    grid_frame.pack(side="right", fill="y")
+    grid_frame.pack_propagate(False)
+
+    canvas_grid = tk.Canvas(grid_frame, bg="#0a0a0a", highlightthickness=0)
+    scrollbar = ttk.Scrollbar(grid_frame, orient="vertical", command=canvas_grid.yview)
+    scrollable_grid = tk.Frame(canvas_grid, bg="#0a0a0a")
+    
+    scrollable_grid.bind("<Configure>", lambda e: canvas_grid.configure(scrollregion=canvas_grid.bbox("all")))
+    canvas_grid.create_window((0, 0), window=scrollable_grid, anchor="nw")
+    canvas_grid.configure(yscrollcommand=scrollbar.set)
+    canvas_grid.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+    scrollbar.pack(side="right", fill="y")
+
+    # --- AUTONOMOUS MULTI-CAMERA DAEMON ---
+    cctv_cameras = {}
+    grid_widgets = {}
+    known_threat_memory = {} # Prevent UI from spamming the same threat every single frame
+
+    def fetch_assigned_cctv_nodes():
+        with get_conn() as conn:
+            return conn.cursor().execute("SELECT camera_name, source FROM cameras WHERE status='active' AND can_surveillance=1").fetchall()
+
+    def boot_surveillance_network():
+        nodes = fetch_assigned_cctv_nodes()
+        if not nodes:
+            messagebox.showwarning("No Nodes", "No cameras in the database are assigned for CCTV Surveillance.")
+            return
+
+        lbl_active_nodes.config(text=f"Active Nodes: {len(nodes)}")
+        cctv_daemon_running[0] = True
+
+        for idx, (cam_name, source) in enumerate(nodes):
+            actual_src = int(source) if str(source).isdigit() else source
+            cam_manager.start_camera(f"soc_{cam_name}", actual_src)
+            cctv_cameras[cam_name] = f"soc_{cam_name}"
+            
+            cam_box = tk.Frame(scrollable_grid, bg="#121212", bd=1, relief="solid", pady=5, padx=5)
+            cam_box.grid(row=idx, column=0, pady=5, padx=5, sticky="ew")
+            
+            lbl_title = tk.Label(cam_box, text=cam_name, bg="#121212", fg="white", font=("Segoe UI", 10, "bold"))
+            lbl_title.pack(anchor="w")
+            
+            lbl_feed = tk.Label(cam_box, bg="black", width=45, height=12) 
+            lbl_feed.pack(pady=5)
+            
+            def make_focus(event, name=cam_name):
+                focused_cctv_camera[0] = name
+                focus_frame.config(text=f" PRIMARY INTERCEPT VIEWPORT: [ {name} ] ")
+                
+            lbl_feed.bind("<Button-1>", make_focus)
+            lbl_title.bind("<Button-1>", make_focus)
+            
+            grid_widgets[cam_name] = {"box": cam_box, "feed": lbl_feed, "title": lbl_title}
+            
+            if focused_cctv_camera[0] is None:
+                make_focus(None, cam_name) 
+
+        threading.Thread(target=autonomous_ai_inference_daemon, daemon=True).start()
+        win.after(33, ui_render_loop)
+
+    def autonomous_ai_inference_daemon():
+        """ BACKGROUND HEADLESS AI ENGINE. Runs independently of UI. """
+        while cctv_daemon_running[0]:
+            for cam_name, cam_slot in cctv_cameras.items():
+                ret, frame = cam_manager.read_camera(cam_slot)
+                if not ret or frame is None: continue
+
+                dt_s, tm_s = datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%H:%M:%S")
+                display_frame = frame.copy()
+                has_critical_threat = False
+
+                faces = FA.get(cv2.resize(frame, (0, 0), fx=0.5, fy=0.5))
+                
+                for face in faces:
+                    x1, y1, x2, y2 = map(int, face.bbox * 2)
+                    sims = face_similarity(KNOWN_EMBEDDINGS, face.embedding)
+                    
+                    if sims.size > 0 and sims.max() >= SIMILARITY_THRESHOLD:
+                        idx = int(sims.argmax())
+                        p_type = KNOWN_PERSON_TYPES[idx]
+                        name = KNOWN_LABELS[idx].split("|")[1].strip()
+                        
+                        # THE BLOCKLIST LOGIC YOU REQUESTED
+                        if p_type == "blacklist":
+                            has_critical_threat = True
+                            color = (0, 0, 255) # RED
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
+                            cv2.putText(display_frame, f"THREAT: {name}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                            
+                            threat_key = f"{cam_name}_{name}"
+                            if time.time() - known_threat_memory.get(threat_key, 0) > 10:
+                                known_threat_memory[threat_key] = time.time()
+                                focused_cctv_camera[0] = cam_name # Auto-Focus UI hook
+                                win.after(10, lambda n=name, c=cam_name, t=tm_s: tv_threats.insert("", 0, values=(t, c, n, "CRITICAL")))
+                                play_success_beep() 
+                        else:
+                            color = (0, 255, 0) # GREEN for known staff/students
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                            cv2.putText(display_frame, name, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    else:
+                        color = (0, 165, 255) # ORANGE for unknown ghosts
+                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(display_frame, "UNKNOWN ENTITY", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+                display_frame = draw_hud(display_frame, cam_name)
+                shared_cctv_frames[cam_name] = (display_frame, has_critical_threat)
+
+            time.sleep(0.05) 
+
+    def ui_render_loop():
+        """ TKINTER UI LOOP. Only reads processed frames, does NOT run AI. """
+        if not win.winfo_exists() or not cctv_daemon_running[0]: return
+
+        # BUG FIX 3: Thread-safe dictionary iteration
+        for cam_name, (frame, is_threat) in list(shared_cctv_frames.items()):
+            if frame is None: continue
+            
+            if cam_name in grid_widgets:
+                gw = grid_widgets[cam_name]
+                if is_threat: gw["box"].config(bg="#ff0000")
+                else: gw["box"].config(bg="#121212")
+                
+                thumb_img = resize_to_fit(frame, 320, 240)
+                imgtk_small = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(thumb_img, cv2.COLOR_BGR2RGB)))
+                gw["feed"].imgtk = imgtk_small
+                gw["feed"].configure(image=imgtk_small)
+
+            if cam_name == focused_cctv_camera[0]:
+                if is_threat: focus_frame.config(fg="#ff4444")
+                else: focus_frame.config(fg="#ffeb3b")
+                
+                # BUG FIX 2: Resize to the LABEL's bounds, not the parent frame's bounds
+                w, h = lbl_focus_video.winfo_width(), lbl_focus_video.winfo_height()
+                if w > 10 and h > 10:
+                    focus_img = resize_to_fit(frame, w, h)
+                    imgtk_large = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(focus_img, cv2.COLOR_BGR2RGB)))
+                    lbl_focus_video.imgtk = imgtk_large
+                    lbl_focus_video.configure(image=imgtk_large, text="")
+
+        win.after(33, ui_render_loop) 
+
+    def on_close():
+        cctv_daemon_running[0] = False
+        for slot in cctv_cameras.values(): cam_manager.stop_camera(slot)
+        shared_cctv_frames.clear()
+        show_dashboard(win, win_name)
+        
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    ctrl_frame = tk.Frame(grid_frame, bg="#121212")
+    ctrl_frame.pack(fill="x", side="bottom")
+    tk.Button(ctrl_frame, text="⚡ INITIALIZE GLOBAL NETWORK", command=boot_surveillance_network, bg="#884EA0", fg="white", font=("Segoe UI", 11, "bold"), cursor="hand2", pady=10).pack(fill="x")
+
+
+# MODULE: ENTERPRISE YOLOv8 + FAISS SOC (TRACK-THEN-RECOGNIZE)
+def open_enterprise_yolo_soc():
+    win_name = "enterprise_yolo_soc"
+    
+    if win_name in open_windows and open_windows[win_name].winfo_exists():
+        open_windows[win_name].deiconify()
+        open_windows[win_name].lift()
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Enterprise SOC: YOLOv8 ByteTrack + FAISS Engine")
+    win.geometry("1350x880")
+    open_windows[win_name] = win
+    win.configure(bg="#050505")
+    add_window_toolbar(win, win_name, stop_camera_instance="yolo_tracker")
+
+    tk.Label(win, text="🛡️ Enterprise SOC: Body Tracking + AI Sniper", font=("Segoe UI", 18, "bold"), bg="#050505", fg="#00e5ff").pack(pady=10)
+    
+    status_var = tk.StringVar(value="Status: Booting Neural Engines...")
+    tk.Label(win, textvariable=status_var, font=("Consolas", 12), bg="#050505", fg="#ffeb3b").pack()
+
+    # --- HARDWARE ROUTING SELECTOR ---
+    routing_frame = tk.Frame(win, bg="#121212", bd=1, relief="solid", pady=5)
+    routing_frame.pack(fill="x", padx=20, pady=10)
+    
+    tk.Label(routing_frame, text="Active Hardware Source:", bg="#121212", fg="#00e5ff", font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+    
+    selected_source = tk.StringVar()
+    camera_combo = create_camera_device_selector(routing_frame, selected_source)
+    camera_combo.pack(side="left", fill="x", expand=True, padx=10)
+
+    viewport_frame = tk.Frame(win, bg="black", bd=1, relief="solid")
+    viewport_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+    viewport_frame.pack_propagate(False)
+    
+    lbl_video = tk.Label(viewport_frame, bg="black")
+    lbl_video.pack(fill="both", expand=True)
+
+    tracking_running = [True]
+    shared_ai_data = {"frame": None, "status": "Booting..."}
+
+    def switch_tracking_stream(*args):
+        source = selected_source.get()
+        if not source: return
+        actual_src = int(source) if source.isdigit() else source
+        cam_manager.start_camera("yolo_tracker", actual_src)
+
+    selected_source.trace_add("write", switch_tracking_stream)
+    win.after(400, switch_tracking_stream)
+
+    # --- 1. BOOT YOLOv8 & FAISS ---
+    def initialize_engines():
+        global yolo_model, faiss_index
+        shared_ai_data["status"] = "Status: Downloading/Loading YOLOv8 Nano... (Takes a moment on first run)"
+        
+        # Auto-downloads yolov8n.pt if missing.
+        try:
+            yolo_model = YOLO("yolov8n.pt") 
+        except Exception as e:
+            shared_ai_data["status"] = f"YOLO Load Failed: {str(e)}"
+            return
+
+        shared_ai_data["status"] = "Status: Building FAISS Vector Index..."
+        
+        # Build FAISS Index dynamically from our in-memory Known Embeddings
+        dimension = 512
+        faiss_index = faiss.IndexFlatIP(dimension) # Exact Inner Product (Super fast for < 50k faces)
+        
+        if len(KNOWN_EMBEDDINGS) > 0:
+            emb_matrix = np.array(KNOWN_EMBEDDINGS).astype('float32')
+            # FAISS FlatIP requires L2 normalized vectors to act exactly like Cosine Similarity
+            faiss.normalize_L2(emb_matrix) 
+            faiss_index.add(emb_matrix)
+            
+        shared_ai_data["status"] = f"Status: Neural Engines Online. FAISS Index Size: {faiss_index.ntotal} vectors."
+        
+        # Start the background AI Thread
+        threading.Thread(target=ai_inference_daemon, daemon=True).start()
+        # Start UI render loop
+        win.after(100, ui_render_loop)
+
+    # --- 2. DECOUPLED AI DAEMON (BACKGROUND THREAD) ---
+    def ai_inference_daemon():
+        """ Runs 100% independently of the UI. Stops lag entirely. """
+        
+        # The ID Recycling Pool Memory
+        active_tracks = {} # Maps YOLO ID -> {"name": str, "sim": float, "attempts": int, "last_seen": float}
+        
+        while tracking_running[0]:
+            ret, frame = cam_manager.read_camera("yolo_tracker")
+            if not ret or frame is None:
+                time.sleep(0.01)
+                continue
+                
+            display_frame = frame.copy()
+            current_time = time.time()
+            current_frame_ids = []
+            
+            # PHASE 1: YOLOv8 BYTETRACK (ULTRA FAST)
+            # classes=[0] ensures we ONLY track humans. tracker="bytetrack.yaml" is best for motion.
+            results = yolo_model.track(frame, persist=True, classes=[0], conf=0.35, tracker="bytetrack.yaml", verbose=False)
+            
+            if results and results[0].boxes and results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
+                track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+                
+                for box, track_id in zip(boxes, track_ids):
+                    current_frame_ids.append(track_id)
+                    x1, y1, x2, y2 = box
+                    
+                    # Initialize OR Update Last Seen Timestamp (5-Second Memory Buffer)
+                    if track_id not in active_tracks:
+                        active_tracks[track_id] = {"name": None, "sim": 0.0, "attempts": 0, "last_seen": current_time}
+                    else:
+                        active_tracks[track_id]["last_seen"] = current_time
+                    
+                    track_data = active_tracks[track_id]
+                    
+                    # PHASE 2: FACE SNIPER (COMPUTE SAVER)
+                    # Only run heavy AI if we don't know who this is, and haven't failed 5 times
+                    if track_data["name"] is None and track_data["attempts"] < 5:
+                        shared_ai_data["status"] = f"Status: Target [{track_id}] locked. Sniping Face Vector..."
+                        
+                        # Crop the bounding box to pass to InsightFace. 
+                        body_crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+                        
+                        if body_crop.size > 0:
+                            faces = FA.get(body_crop)
+                            if len(faces) > 0:
+                                # We found a face! Extract vector and normalize for FAISS
+                                query_vector = np.array([faces[0].embedding]).astype('float32')
+                                faiss.normalize_L2(query_vector)
+                                
+                                # Instantly search FAISS for the closest match
+                                if faiss_index.ntotal > 0:
+                                    distances, indices = faiss_index.search(query_vector, 1)
+                                    best_sim = distances[0][0]
+                                    best_idx = indices[0][0]
+                                    
+                                    # Convert FAISS distance back to a standard percentage
+                                    if best_sim >= SIMILARITY_THRESHOLD:
+                                        name = KNOWN_LABELS[best_idx].split("|")[1].strip()
+                                        track_data["name"] = name
+                                        track_data["sim"] = best_sim * 100
+                                        shared_ai_data["status"] = f"Status: Identity Confirmed: {name}"
+                                        play_success_beep()
+                                    else:
+                                        track_data["name"] = "UNKNOWN ENTITY"
+                                        track_data["sim"] = 0.0
+                                else:
+                                    track_data["name"] = "UNKNOWN ENTITY"
+                                    track_data["sim"] = 0.0
+                            else:
+                                # YOLO saw a body, but InsightFace couldn't see a face (e.g., back turned)
+                                track_data["attempts"] += 1
+                                if track_data["attempts"] >= 5:
+                                    track_data["name"] = "UNRECOGNIZED"
+                                    
+                    # PHASE 3: HUD RENDERING
+                    if track_data["name"] and "UNKNOWN" not in track_data["name"] and "UNRECOGNIZED" not in track_data["name"]:
+                        color = (0, 255, 0)
+                        text = f"ID:{track_id} {track_data['name']} ({track_data['sim']:.0f}%)"
+                    elif track_data["name"] == "UNKNOWN ENTITY":
+                        color = (0, 0, 255)
+                        text = f"ID:{track_id} {track_data['name']} [ALERT]"
+                    else:
+                        color = (0, 165, 255)
+                        text = f"ID:{track_id} TRACKING..."
+                        
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(display_frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # PHASE 4: 5-SECOND ID RECYCLING CLEANUP
+            # Only remove IDs that have been gone for > 5 seconds
+            expired_ids = []
+            for tid, data in active_tracks.items():
+                if tid not in current_frame_ids:
+                    if (current_time - data["last_seen"]) > 5.0:
+                        expired_ids.append(tid)
+            for tid in expired_ids:
+                del active_tracks[tid]
+
+            display_frame = draw_hud(display_frame, "ENTERPRISE YOLO NODE")
+            
+            # Push to shared memory for UI to consume
+            shared_ai_data["frame"] = display_frame
+
+    # --- 3. UI RENDER LOOP (Main Thread) ---
+    def ui_render_loop():
+        if not win.winfo_exists() or not tracking_running[0]: return
+
+        # Read from shared memory without blocking the AI
+        status_var.set(shared_ai_data["status"])
+        frame = shared_ai_data.get("frame")
+        
+        if frame is not None:
+            w, h = viewport_frame.winfo_width(), viewport_frame.winfo_height()
+            if w > 10 and h > 10:
+                resized = resize_to_fit(frame, w, h)
+                imgtk = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
+                lbl_video.imgtk = imgtk
+                lbl_video.configure(image=imgtk, text="")
+                
+        # UI updates cleanly at ~30 FPS
+        win.after(33, ui_render_loop)
+        
+    def on_close():
+        tracking_running[0] = False
+        cam_manager.stop_camera("yolo_tracker")
+        show_dashboard(win, win_name)
+        
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    
+    # Thread the initialization so the UI doesn't freeze while downloading YOLO
+    threading.Thread(target=initialize_engines, daemon=True).start()
+
+# MODULE: PURE PYTHON SPATIAL CENTROID TRACKER (CPU OPTIMIZED)
+
+class CentroidTracker:
+    def __init__(self, max_disappeared=15):
+        self.nextObjectID = 0
+        self.objects = OrderedDict() 
+        self.identities = {}         
+        self.attempts = {}           # NEW: CPU Armor - Tracks failed recognition attempts
+        self.disappeared = OrderedDict()
+        self.maxDisappeared = max_disappeared
+
+    def register(self, centroid):
+        self.objects[self.nextObjectID] = centroid
+        self.disappeared[self.nextObjectID] = 0
+        self.identities[self.nextObjectID] = None 
+        self.attempts[self.nextObjectID] = 0 
+        self.nextObjectID += 1
+        return self.nextObjectID - 1
+
+    def deregister(self, objectID):
+        del self.objects[objectID]
+        del self.disappeared[objectID]
+        if objectID in self.identities: del self.identities[objectID]
+        if objectID in self.attempts: del self.attempts[objectID]
+
+    def update(self, rects):
+        if len(rects) == 0:
+            for objectID in list(self.disappeared.keys()):
+                self.disappeared[objectID] += 1
+                if self.disappeared[objectID] > self.maxDisappeared:
+                    self.deregister(objectID)
+            return self.objects, self.identities, self.attempts
+
+        inputCentroids = np.zeros((len(rects), 2), dtype="int")
+        for (i, (startX, startY, endX, endY)) in enumerate(rects):
+            cX = int((startX + endX) / 2.0)
+            cY = int((startY + endY) / 2.0)
+            inputCentroids[i] = (cX, cY)
+
+        if len(self.objects) == 0:
+            for i in range(0, len(inputCentroids)):
+                self.register(inputCentroids[i])
+        else:
+            objectIDs = list(self.objects.keys())
+            objectCentroids = list(self.objects.values())
+
+            D = dist.cdist(np.array(objectCentroids), inputCentroids)
+            rows = D.min(axis=1).argsort()
+            cols = D.argmin(axis=1)[rows]
+
+            usedRows, usedCols = set(), set()
+
+            for (row, col) in zip(rows, cols):
+                if row in usedRows or col in usedCols: continue
+                if D[row, col] > 100: continue 
+
+                objectID = objectIDs[row]
+                self.objects[objectID] = inputCentroids[col]
+                self.disappeared[objectID] = 0
+                usedRows.add(row)
+                usedCols.add(col)
+
+            unusedRows = set(range(0, D.shape[0])).difference(usedRows)
+            unusedCols = set(range(0, D.shape[1])).difference(usedCols)
+
+            for row in unusedRows:
+                objectID = objectIDs[row]
+                self.disappeared[objectID] += 1
+                if self.disappeared[objectID] > self.maxDisappeared:
+                    self.deregister(objectID)
+
+            for col in unusedCols:
+                self.register(inputCentroids[col])
+
+        return self.objects, self.identities, self.attempts
+
+
+
+# MODULE: ADVANCED TRACKING SOC (TRACK-THEN-RECOGNIZE)
+
+def open_advanced_tracking_soc():
+    win_name = "advanced_tracking_soc"
+    
+    if win_name in open_windows and open_windows[win_name].winfo_exists():
+        open_windows[win_name].deiconify()
+        open_windows[win_name].lift()
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Next-Gen Tracker: Spatial Compute Reduction Engine")
+    win.geometry("1200x800")
+    open_windows[win_name] = win
+    win.configure(bg="#050505")
+    add_window_toolbar(win, win_name, stop_camera_instance="adv_tracker")
+
+    tk.Label(win, text="🎯 Advanced AI Spatial Tracking (Compute Saver)", font=("Segoe UI", 18, "bold"), bg="#050505", fg="#00e5ff").pack(pady=10)
+    
+    status_var = tk.StringVar(value="Status: Spatial Tracker Offline")
+    tk.Label(win, textvariable=status_var, font=("Consolas", 12), bg="#050505", fg="#ffeb3b").pack()
+
+    routing_frame = tk.Frame(win, bg="#121212", bd=1, relief="solid", pady=5)
+    routing_frame.pack(fill="x", padx=20, pady=10)
+    
+    tk.Label(routing_frame, text="Active Hardware Source:", bg="#121212", fg="#00e5ff", font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+    
+    selected_source = tk.StringVar()
+    camera_combo = create_camera_device_selector(routing_frame, selected_source)
+    camera_combo.pack(side="left", fill="x", expand=True, padx=10)
+
+    viewport_frame = tk.Frame(win, bg="black", bd=1, relief="solid")
+    viewport_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+    viewport_frame.pack_propagate(False)
+    
+    lbl_video = tk.Label(viewport_frame, bg="black")
+    lbl_video.pack(fill="both", expand=True)
+
+    ct = CentroidTracker(max_disappeared=15)
+    tracking_running = [True]
+
+    def switch_tracking_stream(*args):
+        source = selected_source.get()
+        if not source: return
+        actual_src = int(source) if source.isdigit() else source
+        cam_manager.start_camera("adv_tracker", actual_src)
+
+    selected_source.trace_add("write", switch_tracking_stream)
+    win.after(400, switch_tracking_stream)
+
+    def tracking_loop():
+        if not win.winfo_exists() or not tracking_running[0]: return
+
+        ret, frame = cam_manager.read_camera("adv_tracker")
+        if ret and frame is not None:
+            display_frame = frame.copy()
+            
+            # --- PHASE 1: DETECTION (FAST DOWNSCALE) ---
+            # Shrink the frame by 50% to heavily reduce baseline CPU usage
+            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+
+            try:
+                bboxes, _ = FA.models['detection'].detect(small_frame, max_num=10, metric='default')
+            except Exception:
+                bboxes = []
+
+            rects = []
+            if bboxes is not None:
+                for bbox in bboxes:
+                    # Multiply by 2 to map the small frame coordinates back to the original HD frame
+                    rects.append((int(bbox[0]*2), int(bbox[1]*2), int(bbox[2]*2), int(bbox[3]*2)))
+
+            objects, identities, attempts = ct.update(rects)
+
+            # --- PHASE 2: SAFE SELECTIVE RECOGNITION (NO LOOPS) ---
+            needs_recognition = [objID for objID, ident in identities.items() if ident is None]
+
+            if len(needs_recognition) > 0:
+                status_var.set("Status: Resolving Matrix Identity...")
+                
+                # Run full extraction safely on the downscaled frame
+                faces = FA.get(small_frame)
+
+                for face in faces:
+                    fx1, fy1, fx2, fy2 = map(int, face.bbox * 2)
+                    fcX, fcY = (fx1 + fx2) / 2.0, (fy1 + fy2) / 2.0
+
+                    for objID in needs_recognition:
+                        if identities[objID] is not None: continue 
+
+                        centroid = objects[objID]
+                        if dist.euclidean((fcX, fcY), centroid) < 80:
+                            sims = face_similarity(KNOWN_EMBEDDINGS, face.embedding)
+                            if sims.size > 0 and sims.max() >= SIMILARITY_THRESHOLD:
+                                idx = int(sims.argmax())
+                                name = KNOWN_LABELS[idx].split("|")[1].strip()
+                                identities[objID] = {"name": name, "sim": sims.max() * 100, "color": (0,255,0)}
+                            else:
+                                # Found face, but vector not in DB -> Mark as UNKNOWN permanently
+                                identities[objID] = {"name": "UNKNOWN", "sim": 0.0, "color": (0,165,255)}
+
+                # CPU ARMOR: If the face extraction failed entirely, increment attempt counter
+                for objID in needs_recognition:
+                    if identities[objID] is None:
+                        attempts[objID] += 1
+                        if attempts[objID] >= 5:
+                            # Stop trying to recognize after 5 failed frames to prevent CPU melting
+                            identities[objID] = {"name": "UNRECOGNIZED", "sim": 0.0, "color": (150,150,150)}
+                            status_var.set("Status: Target Unrecognized. Aborting heavy AI loop.")
+                        else:
+                            status_var.set(f"Status: Recognition Attempt {attempts[objID]}/5...")
+            else:
+                status_var.set("Status: Spatial Tracking Matrix Active (Compute Saver ON)")
+
+            # --- PHASE 3: RENDER HUD ---
+            if bboxes is not None:
+                for (startX, startY, endX, endY) in rects:
+                    cX, cY = int((startX + endX) / 2.0), int((startY + endY) / 2.0)
+                    
+                    matched_id = None
+                    for objID, centroid in objects.items():
+                        if dist.euclidean((cX, cY), centroid) < 50:
+                            matched_id = objID
+                            break
+                    
+                    if matched_id is not None:
+                        identity = identities.get(matched_id)
+                        if identity:
+                            color = identity["color"]
+                            text = f"[{matched_id}] {identity['name']} ({identity['sim']:.0f}%)"
+                        else:
+                            color = (255,255,0)
+                            text = f"[{matched_id}] ANALYZING..."
+                            
+                        cv2.rectangle(display_frame, (startX, startY), (endX, endY), color, 2)
+                        cv2.putText(display_frame, text, (startX, startY - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        cv2.circle(display_frame, (cX, cY), 4, color, -1)
+
+            display_frame = draw_hud(display_frame, "SPATIAL TRACKING NODE")
+            
+            w, h = viewport_frame.winfo_width(), viewport_frame.winfo_height()
+            if w > 10 and h > 10:
+                resized = resize_to_fit(display_frame, w, h)
+                imgtk = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
+                lbl_video.imgtk = imgtk
+                lbl_video.configure(image=imgtk, text="")
+                
+        # Thermal Throttling: Runs at ~16 FPS to let the CPU breathe
+        win.after(60, tracking_loop)
+        
+    def on_close():
+        tracking_running[0] = False
+        cam_manager.stop_camera("adv_tracker")
+        show_dashboard(win, win_name)
+        
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    win.after(500, tracking_loop)
+
 # ---------- DASHBOARD ----------
 root = tk.Tk(); root.title("CCTV & Attendance Master")
 root.geometry("1200x780"); root.minsize(1000, 650); set_zoomed(root)
@@ -4516,6 +5368,10 @@ make_card(grid, "📈", "Analytics Lab", open_analytics_reports, 250, 138).grid(
 make_card(grid, "🛡️", "Security Operations Center", open_cctv_surveillance_soc, 250, 138).grid(row=2, column=2, padx=10, pady=10)
 make_card(grid, "⌘", "System Tools", open_tools_window, 250, 138).grid(row=2, column=3, padx=10, pady=10)
 #make_card(grid, "⌘", "Identity & Biometric Hub", open_identity_management_hub, 250, 138).grid(row=3, column=1, padx=10, pady=10)
+make_card(grid, "⌘", "Tracking", open_ghost_tracking_matrix, 250, 138).grid(row=3, column=1, padx=10, pady=10)
+make_card(grid, "🛡️", "Master SOC Command", open_master_soc_matrix, 250, 138).grid(row=3, column=0, padx=10, pady=10)
+make_card(grid, "🎯", "Advanced Tracking SOC", open_advanced_tracking_soc, 250, 138).grid(row=3, column=2, padx=10, pady=10)
+make_card(grid, "👁️", "YOLOv8 Enterprise SOC", open_enterprise_yolo_soc, 250, 138).grid(row=3, column=3, padx=10, pady=10)
 
 bot = tk.Frame(root, pady=10); bot.pack(fill="x", side="bottom")
 
