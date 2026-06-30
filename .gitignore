@@ -153,8 +153,9 @@ assets/banner.png
 *.mov
 vsv.py
 vsv2.py
-vsv2
-
+vsv2*
+*.pt
+yolov8n.pt
 # -------------------------
 # Keep Folder Structure
 # -------------------------

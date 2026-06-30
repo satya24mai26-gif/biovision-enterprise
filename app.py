@@ -4892,9 +4892,8 @@ def open_enterprise_yolo_soc():
     # --- 1. BOOT YOLOv8 & FAISS ---
     def initialize_engines():
         global yolo_model, faiss_index
-        shared_ai_data["status"] = "Status: Downloading/Loading YOLOv8 Nano... (Takes a moment on first run)"
+        shared_ai_data["status"] = "Status: Downloading/Loading YOLOv8 Nano..."
         
-        # Auto-downloads yolov8n.pt if missing.
         try:
             yolo_model = YOLO("yolov8n.pt") 
         except Exception as e:
@@ -4903,29 +4902,23 @@ def open_enterprise_yolo_soc():
 
         shared_ai_data["status"] = "Status: Building FAISS Vector Index..."
         
-        # Build FAISS Index dynamically from our in-memory Known Embeddings
         dimension = 512
-        faiss_index = faiss.IndexFlatIP(dimension) # Exact Inner Product (Super fast for < 50k faces)
+        faiss_index = faiss.IndexFlatIP(dimension) 
         
         if len(KNOWN_EMBEDDINGS) > 0:
             emb_matrix = np.array(KNOWN_EMBEDDINGS).astype('float32')
-            # FAISS FlatIP requires L2 normalized vectors to act exactly like Cosine Similarity
             faiss.normalize_L2(emb_matrix) 
             faiss_index.add(emb_matrix)
             
         shared_ai_data["status"] = f"Status: Neural Engines Online. FAISS Index Size: {faiss_index.ntotal} vectors."
         
-        # Start the background AI Thread
         threading.Thread(target=ai_inference_daemon, daemon=True).start()
-        # Start UI render loop
         win.after(100, ui_render_loop)
 
     # --- 2. DECOUPLED AI DAEMON (BACKGROUND THREAD) ---
     def ai_inference_daemon():
-        """ Runs 100% independently of the UI. Stops lag entirely. """
-        
-        # The ID Recycling Pool Memory
-        active_tracks = {} # Maps YOLO ID -> {"name": str, "sim": float, "attempts": int, "last_seen": float}
+        # ID Recycling Pool Memory (Added frame_counter for Cooldown Logic)
+        active_tracks = {} 
         
         while tracking_running[0]:
             ret, frame = cam_manager.read_camera("yolo_tracker")
@@ -4937,9 +4930,9 @@ def open_enterprise_yolo_soc():
             current_time = time.time()
             current_frame_ids = []
             
-            # PHASE 1: YOLOv8 BYTETRACK (ULTRA FAST)
-            # classes=[0] ensures we ONLY track humans. tracker="bytetrack.yaml" is best for motion.
-            results = yolo_model.track(frame, persist=True, classes=[0], conf=0.35, tracker="bytetrack.yaml", verbose=False)
+            # PHASE 1: YOLOv8 BYTETRACK 
+            # conf bumped to 0.45 to prevent ghost tracks on furniture
+            results = yolo_model.track(frame, persist=True, classes=[0], conf=0.45, tracker="bytetrack.yaml", verbose=False)
             
             if results and results[0].boxes and results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
@@ -4949,56 +4942,55 @@ def open_enterprise_yolo_soc():
                     current_frame_ids.append(track_id)
                     x1, y1, x2, y2 = box
                     
-                    # Initialize OR Update Last Seen Timestamp (5-Second Memory Buffer)
+                    # Initialize or Update the Track
                     if track_id not in active_tracks:
-                        active_tracks[track_id] = {"name": None, "sim": 0.0, "attempts": 0, "last_seen": current_time}
+                        active_tracks[track_id] = {"name": None, "sim": 0.0, "frame_counter": 0, "last_seen": current_time}
                     else:
                         active_tracks[track_id]["last_seen"] = current_time
                     
                     track_data = active_tracks[track_id]
+                    track_data["frame_counter"] += 1
                     
-                    # PHASE 2: FACE SNIPER (COMPUTE SAVER)
-                    # Only run heavy AI if we don't know who this is, and haven't failed 5 times
-                    if track_data["name"] is None and track_data["attempts"] < 5:
-                        shared_ai_data["status"] = f"Status: Target [{track_id}] locked. Sniping Face Vector..."
-                        
-                        # Crop the bounding box to pass to InsightFace. 
-                        body_crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
-                        
-                        if body_crop.size > 0:
-                            faces = FA.get(body_crop)
-                            if len(faces) > 0:
-                                # We found a face! Extract vector and normalize for FAISS
-                                query_vector = np.array([faces[0].embedding]).astype('float32')
-                                faiss.normalize_L2(query_vector)
-                                
-                                # Instantly search FAISS for the closest match
-                                if faiss_index.ntotal > 0:
-                                    distances, indices = faiss_index.search(query_vector, 1)
-                                    best_sim = distances[0][0]
-                                    best_idx = indices[0][0]
+                    # PHASE 2: INFINITE PATIENCE FACE SNIPER
+                    # If we don't know who this is, try to scan them ONLY once every 10 frames (Cooldown)
+                    if track_data["name"] is None or track_data["name"] == "UNKNOWN ENTITY":
+                        if track_data["frame_counter"] % 10 == 0:
+                            shared_ai_data["status"] = f"Status: Target [{track_id}] locked. Sniping Face Vector..."
+                            
+                            # Padded Crop: Send the whole body box, but expand it by 15 pixels 
+                            # so if their face is on the very edge of the box, it doesn't get cut in half.
+                            pad = 15
+                            body_crop = frame[max(0, y1-pad):min(frame.shape[0], y2+pad), max(0, x1-pad):min(frame.shape[1], x2+pad)]
+                            
+                            if body_crop.size > 0:
+                                faces = FA.get(body_crop)
+                                if len(faces) > 0:
+                                    # Face Found! Extract and FAISS match
+                                    query_vector = np.array([faces[0].embedding]).astype('float32')
+                                    faiss.normalize_L2(query_vector)
                                     
-                                    # Convert FAISS distance back to a standard percentage
-                                    if best_sim >= SIMILARITY_THRESHOLD:
-                                        name = KNOWN_LABELS[best_idx].split("|")[1].strip()
-                                        track_data["name"] = name
-                                        track_data["sim"] = best_sim * 100
-                                        shared_ai_data["status"] = f"Status: Identity Confirmed: {name}"
-                                        play_success_beep()
-                                    else:
-                                        track_data["name"] = "UNKNOWN ENTITY"
-                                        track_data["sim"] = 0.0
+                                    if faiss_index.ntotal > 0:
+                                        distances, indices = faiss_index.search(query_vector, 1)
+                                        best_sim = distances[0][0]
+                                        best_idx = indices[0][0]
+                                        
+                                        if best_sim >= SIMILARITY_THRESHOLD:
+                                            name = KNOWN_LABELS[best_idx].split("|")[1].strip()
+                                            track_data["name"] = name
+                                            track_data["sim"] = best_sim * 100
+                                            shared_ai_data["status"] = f"Status: Identity Confirmed: {name}"
+                                            play_success_beep()
+                                        else:
+                                            # Face found, but doesn't match database
+                                            track_data["name"] = "UNKNOWN ENTITY"
+                                            track_data["sim"] = best_sim * 100
                                 else:
-                                    track_data["name"] = "UNKNOWN ENTITY"
-                                    track_data["sim"] = 0.0
-                            else:
-                                # YOLO saw a body, but InsightFace couldn't see a face (e.g., back turned)
-                                track_data["attempts"] += 1
-                                if track_data["attempts"] >= 5:
-                                    track_data["name"] = "UNRECOGNIZED"
+                                    # No face found (e.g. back of head). Do nothing. 
+                                    # We will automatically try again in 10 frames!
+                                    pass
                                     
                     # PHASE 3: HUD RENDERING
-                    if track_data["name"] and "UNKNOWN" not in track_data["name"] and "UNRECOGNIZED" not in track_data["name"]:
+                    if track_data["name"] and "UNKNOWN" not in track_data["name"]:
                         color = (0, 255, 0)
                         text = f"ID:{track_id} {track_data['name']} ({track_data['sim']:.0f}%)"
                     elif track_data["name"] == "UNKNOWN ENTITY":
@@ -5006,13 +4998,12 @@ def open_enterprise_yolo_soc():
                         text = f"ID:{track_id} {track_data['name']} [ALERT]"
                     else:
                         color = (0, 165, 255)
-                        text = f"ID:{track_id} TRACKING..."
+                        text = f"ID:{track_id} WAITING FOR FACE..."
                         
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(display_frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             
             # PHASE 4: 5-SECOND ID RECYCLING CLEANUP
-            # Only remove IDs that have been gone for > 5 seconds
             expired_ids = []
             for tid, data in active_tracks.items():
                 if tid not in current_frame_ids:
@@ -5023,14 +5014,17 @@ def open_enterprise_yolo_soc():
 
             display_frame = draw_hud(display_frame, "ENTERPRISE YOLO NODE")
             
-            # Push to shared memory for UI to consume
+            # Push to shared memory
             shared_ai_data["frame"] = display_frame
+            
+            # CRITICAL FIX: Sleep for 30ms to sync with the camera's 30FPS. 
+            # Prevents the AI from processing the exact same frame twice and burning the CPU.
+            time.sleep(0.03) 
 
     # --- 3. UI RENDER LOOP (Main Thread) ---
     def ui_render_loop():
         if not win.winfo_exists() or not tracking_running[0]: return
 
-        # Read from shared memory without blocking the AI
         status_var.set(shared_ai_data["status"])
         frame = shared_ai_data.get("frame")
         
@@ -5042,7 +5036,6 @@ def open_enterprise_yolo_soc():
                 lbl_video.imgtk = imgtk
                 lbl_video.configure(image=imgtk, text="")
                 
-        # UI updates cleanly at ~30 FPS
         win.after(33, ui_render_loop)
         
     def on_close():
@@ -5051,8 +5044,6 @@ def open_enterprise_yolo_soc():
         show_dashboard(win, win_name)
         
     win.protocol("WM_DELETE_WINDOW", on_close)
-    
-    # Thread the initialization so the UI doesn't freeze while downloading YOLO
     threading.Thread(target=initialize_engines, daemon=True).start()
 
 # MODULE: PURE PYTHON SPATIAL CENTROID TRACKER (CPU OPTIMIZED)
